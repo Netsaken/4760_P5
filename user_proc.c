@@ -1,53 +1,35 @@
-#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ipc.h>
-#include <sys/msg.h>
-#include <sys/resource.h>
 #include <sys/shm.h>
 #include <sys/types.h>
 #include <unistd.h>
 
-#define QUANTUM 10000000
 #define BILLION 1000000000UL //1 second in nanoseconds
-#define CHANCE_TO_TERMINATE 20
-#define BLOCK_CHANCE 5
 
 unsigned int *sharedNS;
 unsigned int *sharedSecs;
-struct PCT *procCtl = {0};
+struct RT *resourceTbl = {0};
 
-struct my_msgbuf {
-   long mtype;
-   char mtext[10];
-};
-
-struct PCB {
-    unsigned int totalCPUTimeUsed;
-    unsigned int totalTimeInSystem;
-    unsigned int lastTimeUsed;
-    //Pid to be set with "getpid();"
-    pid_t thisPid;
-    int priority;
-    int iValue;
-};
-
-struct PCT {
-    struct PCB ctrlTbl[18];
-    int blocksInUse[18];
+struct RT {
+    pid_t pidArray[18];
+    int reqMtx[18][10];
+    int rsrcVec[10];
 };
 
 void endProcess() {
     //Detach shared memory
     if (shmdt(sharedNS) == -1) {
         perror("./user_proc: endShmdtNS");
-        exit(1);
     }
 
     if (shmdt(sharedSecs) == -1) {
         perror("./user_proc: endShmdtSecs");
-        exit(1);
+    }
+
+    if (shmdt(resourceTbl) == -1) {
+        perror("./user_proc: endShmdtRsrc");
     }
 
     exit(0);
@@ -55,16 +37,15 @@ void endProcess() {
 
 int main(int argc, char *argv[])
 {
-    struct my_msgbuf buf;
-    int shmid_NS, shmid_Secs;
-    unsigned int initialSharedSecs, initialSharedNS, interTImeNS;
+    int shmid_NS, shmid_Secs, shmid_Rsrc;
+    unsigned int initialSharedSecs, initialSharedNS, newTimeSecs, newTimeNS;
 
     int msqid;
     int i = atoi(argv[0]);
 
     key_t keyNS = ftok("./README.txt", 'Q');
     key_t keySecs = ftok("./README.txt", 'b');
-    key_t keyMsg = ftok("./user_proc.c", 't');
+    key_t keyRsrc = ftok(".user_proc.c", 't');
 
     //Format "perror"
     char* title = argv[0];
@@ -88,6 +69,14 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    shmid_Rsrc = shmget(keyRsrc, sizeof(resourceTbl), IPC_CREAT | 0666);
+    if (shmid_Rsrc == -1) {
+        strcpy(report, ": shmgetRsrc");
+        message = strcat(title, report);
+        perror(message);
+        return 1;
+    }
+
     //Attach shared memory
     sharedNS = (unsigned int*)shmat(shmid_NS, NULL, 0);
     if (sharedNS == (void *) -1) {
@@ -105,9 +94,9 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    //Get message queue
-    if ((msqid = msgget(keyMsg, 0666 | IPC_CREAT)) == -1) {
-        strcpy(report, ": msgget");
+    resourceTbl = shmat(shmid_Rsrc, NULL, 0);
+    if (resourceTbl == (void *) -1) {
+        strcpy(report, ": shmatRsrc");
         message = strcat(title, report);
         perror(message);
         return 1;
@@ -119,7 +108,17 @@ int main(int argc, char *argv[])
 
     *********************************************************************************/
 
-    printf("Hi! o/\nMy name is Proccy! :B\n");
+    printf("Hi there! o/ My name is Proccy %i! :B\n", i);
+    printf("Here the array:\n");
+    for (int j = 0; j < 10; j++) {
+        printf("%i ", resourceTbl->rsrcVec[j]);
+    }
+    printf("\n");
+
+    // while(1) {
+    //     printf("Testing Sigterm... this should stop... %i\n", i);
+    //     sleep(1);
+    // }
 
     endProcess();
 

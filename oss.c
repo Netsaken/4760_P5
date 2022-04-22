@@ -4,36 +4,47 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ipc.h>
-#include <sys/msg.h>
-#include <sys/resource.h>
 #include <sys/shm.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <time.h>
 #include <unistd.h>
 
 #define BILLION 1000000000UL //1 second in nanoseconds
 
 pid_t childPid;
+FILE *file;
 
-unsigned int *sharedNS;
-unsigned int *sharedSecs;
-struct PCT *procCtl = {0};
-int shmid_NS, shmid_Secs, shmid_PCT;
-int msqid;
-int queueSize = 0;
+unsigned int *sharedNS = 0;
+unsigned int *sharedSecs = 0;
+struct RT *resourceTbl = {0};
+int shmid_NS, shmid_Secs, shmid_Rsrc;
 
+struct RT {
+    pid_t pidArray[18];
+    int reqMtx[18][10];
+    int rsrcVec[10];
+};
+
+//Safely terminates program after error, interrupt, or Alarm timer
 static void handle_sig(int sig) {
     int errsave, status;
     errsave = errno;
     //Print notification
-    printf("Program interrupted. Shutting down...\n");
+    printf("Program finished or interrupted. Cleaning up...\n");
+
+    //Close file
+    fclose(file);
 
     //End children
-    if (childPid != 0) {
-        kill(childPid, SIGTERM);
-        waitpid(childPid, &status, 0);
+    sleep(1);
+    for (int k = 0; k < 18; k++) {
+        if (resourceTbl->pidArray[k] != 0) {
+            kill(resourceTbl->pidArray[k], SIGTERM);
+            waitpid(resourceTbl->pidArray[k], &status, 0);
+        }
     }
+    // kill(0, SIGTERM);
+    // waitpid(childPid, &status, 0);
 
     //Detach shared memory
     if (shmdt(sharedNS) == -1) {
@@ -42,6 +53,10 @@ static void handle_sig(int sig) {
 
     if (shmdt(sharedSecs) == -1) {
         perror("./oss: sigShmdtSecs");
+    }
+
+    if (shmdt(resourceTbl) == -1) {
+        perror("./oss: sigShmdtRsrc");
     }
 
     //Remove shared memory
@@ -53,13 +68,11 @@ static void handle_sig(int sig) {
         perror("./oss: sigShmctlSecs");
     }
 
-    // Remove message queue
-    if (msgctl(msqid, IPC_RMID, NULL) == -1)
-    {
-        perror("./oss: sigMsgctl");
+    if (shmctl(shmid_Rsrc, IPC_RMID, 0) == -1) {
+        perror("./oss: sigShmctlRsrc");
     }
 
-    printf("Cleanup complete. Have a nice day!\n");
+    printf("Cleanup complete!\n");
 
     //Exit program
     errno = errsave;
@@ -73,32 +86,20 @@ static int setupinterrupt(void) {
     return (sigemptyset(&act.sa_mask) || sigaction(SIGALRM, &act, NULL));
 }
 
-struct my_msgbuf {
-   long mtype;
-   char mtext[10];
-};
-
 int main(int argc, char *argv[])
 {
     signal(SIGINT, handle_sig);
-    signal(SIGABRT, handle_sig);
-
-    FILE *file;
-    struct my_msgbuf buf;
+    signal(SIGALRM, handle_sig);
 
     key_t keyNS = ftok("./README.txt", 'Q');
     key_t keySecs = ftok("./README.txt", 'b');
-    key_t keyMsg = ftok("./user_proc.c", 't');
+    key_t keyRsrc = ftok(".user_proc.c", 't');
     char iNum[3];
     int iInc = 0;
+    int maxProcsHit = 0;
 
-    struct timespec currentTime;
-    unsigned long initialTimeNS, elapsedTimeNS, initialQuantumNS;
+    unsigned long initialTimeNS, elapsedTimeNS;
     unsigned int randomTimeNS = 0, randomTimeSecs = 0;
-    int initSwitch = 1;
-    
-    const unsigned int maxTimeBetweenNewProcsNS = 500000000;
-    const unsigned int maxTimeBetweenNewProcsSecs = 0;
 
     //Format "perror"
     char* title = argv[0];
@@ -110,7 +111,7 @@ int main(int argc, char *argv[])
         strcpy(report, ": setupinterrupt");
         message = strcat(title, report);
         perror(message);
-        abort();
+        return 1;
     }
 
     //Get shared memory
@@ -119,7 +120,7 @@ int main(int argc, char *argv[])
         strcpy(report, ": shmgetNS");
         message = strcat(title, report);
         perror(message);
-        abort();
+        return 1;
     }
 
     shmid_Secs = shmget(keySecs, sizeof(sharedSecs), IPC_CREAT | 0666);
@@ -127,7 +128,15 @@ int main(int argc, char *argv[])
         strcpy(report, ": shmgetSecs");
         message = strcat(title, report);
         perror(message);
-        abort();
+        return 1;
+    }
+
+    shmid_Rsrc = shmget(keyRsrc, sizeof(resourceTbl), IPC_CREAT | 0666);
+    if (shmid_Rsrc == -1) {
+        strcpy(report, ": shmgetRsrc");
+        message = strcat(title, report);
+        perror(message);
+        return 1;
     }
 
     //Attach shared memory
@@ -136,7 +145,7 @@ int main(int argc, char *argv[])
         strcpy(report, ": shmatNS");
         message = strcat(title, report);
         perror(message);
-        abort();
+        return 1;
     }
 
     sharedSecs = shmat(shmid_Secs, NULL, 0);
@@ -144,15 +153,15 @@ int main(int argc, char *argv[])
         strcpy(report, ": shmatSecs");
         message = strcat(title, report);
         perror(message);
-        abort();
+        return 1;
     }
 
-    //Get message queue
-    if ((msqid = msgget(keyMsg, 0666 | IPC_CREAT)) == -1) {
-        strcpy(report, ": msgget");
+    resourceTbl = shmat(shmid_Rsrc, NULL, 0);
+    if (resourceTbl == (void *) -1) {
+        strcpy(report, ": shmatRsrc");
         message = strcat(title, report);
         perror(message);
-        abort();
+        return 1;
     }
 
     /********************************************************************************
@@ -160,88 +169,59 @@ int main(int argc, char *argv[])
     Start doing things here
 
     *********************************************************************************/
+    //End program after 2 seconds
+    alarm(2);
+
+    //Initialize the other half of the deadlock detection algorithm
+    int alloMtx[18][10];
+    int alloVec[10];
+    for (int i = 0; i < 10; i++) { //Randomize values for shared resource vector (total resources)
+        resourceTbl->rsrcVec[i] = (rand() % 20) + 1; //Between 1 and 20, inclusive
+    }
+
+    //Open file (closed in handle_sig())
     file = fopen("LOGFile.txt", "w");
 
-    /* START THE CL0CK */
-    //Get the random time interval (only if it is not already set)
-    if (initSwitch == 1) {
-        randomTimeSecs = rand() % (maxTimeBetweenNewProcsSecs + 1);
-        randomTimeNS = rand() % maxTimeBetweenNewProcsNS;
+    //Loop until alarm rings
+    for (;;) {
+        //Before creating child, reset iInc value to the first available empty slot in table
+        for (int j = 0; j < 18; j++) {
+            if (resourceTbl->pidArray[j] == 0) {
+                iInc = j;
+                maxProcsHit = 0;
+                break;
+            }
+            maxProcsHit = 1;
+        }
 
-        clock_gettime(CLOCK_MONOTONIC, &currentTime);
-        initialTimeNS = (currentTime.tv_sec * BILLION) + currentTime.tv_nsec;
-        initSwitch = 0;
+        //Create a user process
+        if (maxProcsHit == 0) {
+            childPid = fork();
+            if (childPid == -1) {
+                strcpy(report, ": childPid");
+                message = strcat(title, report);
+                perror(message);
+                return 1;
+            }
+
+            //Allocate block and execute process
+            if (childPid == 0) {
+                sprintf(iNum, "%i", iInc);
+                execl("./user_proc", iNum, NULL);
+            } else {
+                //Store childPid
+                resourceTbl->pidArray[iInc] = childPid;
+
+                sleep(1);
+            }
+        }
     }
-
-    //Count the time
-    clock_gettime(CLOCK_MONOTONIC, &currentTime);
-    elapsedTimeNS = ((currentTime.tv_sec * BILLION) + currentTime.tv_nsec) - initialTimeNS;
-
-    // Create a user process
-    childPid = fork();
-    if (childPid == -1) {
-        strcpy(report, ": childPid");
-        message = strcat(title, report);
-        perror(message);
-        abort();
-    }
-
-    // Allocate block, add to queue, and execute process
-    if (childPid == 0) {
-        sprintf(iNum, "%i", iInc);
-        execl("./user_proc", iNum, NULL);
-    }
-    else
-    {
-        sleep(1);
-    }
-
-    fclose(file);
 
     /**********************************************************************************
    
     End doing things here
 
     ***********************************************************************************/
-
-    //Remove message queue
-    if (msgctl(msqid, IPC_RMID, NULL) == -1)
-    {
-        strcpy(report, ": msgctl");
-        message = strcat(title, report);
-        perror(message);
-        abort();
-    }
-
-    //Detach shared memory
-    if (shmdt(sharedNS) == -1) {
-        strcpy(report, ": shmdtNS");
-        message = strcat(title, report);
-        perror(message);
-        abort();
-    }
-
-    if (shmdt(sharedSecs) == -1) {
-        strcpy(report, ": shmdtSecs");
-        message = strcat(title, report);
-        perror(message);
-        abort();
-    }
-
-    //Remove shared memory
-    if (shmctl(shmid_NS, IPC_RMID, 0) == -1) {
-        strcpy(report, ": shmctlNS");
-        message = strcat(title, report);
-        perror(message);
-        abort();
-    }
-
-    if (shmctl(shmid_Secs, IPC_RMID, 0) == -1) {
-        strcpy(report, ": shmctlSecs");
-        message = strcat(title, report);
-        perror(message);
-        abort();
-    }
 
     return 0;
 }
