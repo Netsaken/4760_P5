@@ -7,6 +7,7 @@
 #include <sys/shm.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #define BILLION 1000000000UL //1 second in nanoseconds
@@ -96,10 +97,11 @@ int main(int argc, char *argv[])
     key_t keyRsrc = ftok(".user_proc.c", 't');
     char iNum[3];
     int iInc = 0;
-    int maxProcsHit = 0;
+    int maxProcsHit = 0, requestCount = 0, lineCount = 0;
 
-    unsigned long initialTimeNS, elapsedTimeNS;
-    unsigned int randomTimeNS = 0, randomTimeSecs = 0;
+    unsigned long initialTimeNS, initialTimeSecs;
+    unsigned int randomTimeNS = 0;
+    int initSwitch = 1;
 
     //Format "perror"
     char* title = argv[0];
@@ -173,9 +175,11 @@ int main(int argc, char *argv[])
     alarm(2);
 
     //Initialize the other half of the deadlock detection algorithm
-    int alloMtx[18][10];
-    int alloVec[10];
-    for (int i = 0; i < 10; i++) { //Randomize values for shared resource vector (total resources)
+    int alloMtx[18][10] = {0};
+    int alloVec[10] = {0};
+    //Randomize values for shared resource vector (total resources)
+    srand(time(NULL));
+    for (int i = 0; i < 10; i++) { 
         resourceTbl->rsrcVec[i] = (rand() % 20) + 1; //Between 1 and 20, inclusive
     }
 
@@ -184,35 +188,155 @@ int main(int argc, char *argv[])
 
     //Loop until alarm rings
     for (;;) {
-        //Before creating child, reset iInc value to the first available empty slot in table
-        for (int j = 0; j < 18; j++) {
-            if (resourceTbl->pidArray[j] == 0) {
-                iInc = j;
-                maxProcsHit = 0;
-                break;
-            }
-            maxProcsHit = 1;
+        //Get a random time interval for process creation (only if it is not already set)
+        if (initSwitch == 1) {
+            initialTimeSecs = *sharedSecs;
+            initialTimeNS = *sharedNS;
+
+            randomTimeNS = (rand() % 499000000) + 1000000; //Between 1 and 500 milliseconds, inclusive
+            initSwitch = 0;
         }
 
-        //Create a user process
-        if (maxProcsHit == 0) {
-            childPid = fork();
-            if (childPid == -1) {
-                strcpy(report, ": childPid");
-                message = strcat(title, report);
-                perror(message);
-                return 1;
+        //Add ambient time to the clock
+        *sharedNS += 100000; //0.1 milliseconds
+        if (*sharedNS >= BILLION) {
+            *sharedSecs += 1;
+            *sharedNS -= BILLION;
+        }
+
+        /********************************************************************************************************************
+        Check to see if a resource has been requested or released
+        *********************************************************************************************************************/
+        for (int p = 0; p < 18; p++) {
+            for (int r = 0; r < 10; r++) {
+                //If the number is greater than 0, it's a request
+                if (resourceTbl->reqMtx[p][r] > 0) {
+                    //Log to file
+                    if (lineCount < 100000) {
+                        fprintf(file, "Master detecting Process P%i REQUESTING resources at clock time %li:%09li\n", p, (long)*sharedSecs, (long)*sharedNS);
+                        ++lineCount;
+                    }
+
+                    //If resource is available, grant it
+                    if (alloVec[r] < resourceTbl->rsrcVec[r]) {
+                        ++requestCount;
+
+                        //Increase value in allocation matrix and vector
+                        alloMtx[p][r] += 1;
+                        alloVec[r] += 1;
+
+                        //Log to file
+                        if (lineCount < 100000) {
+                            fprintf(file, "\tMaster granting Resource R%i to Process P%i at clock time %li:%09li\n", r, p, (long)*sharedSecs, (long)*sharedNS);
+                            ++lineCount;
+                        }
+
+
+                        resourceTbl->reqMtx[p][r] = 0;
+                    } else {
+                        //Log to file
+                        if (lineCount < 100000) {
+                            fprintf(file, "\tResource R%i is unavailable, Process P%i is waiting at clock time %li:%09li\n", r, p, (long)*sharedSecs, (long)*sharedNS);
+                            ++lineCount;
+                        }
+                    }
+                //If the number is less than 0, it's a release
+                } else if (resourceTbl->reqMtx[p][r] < 0) {
+                    //Log to file
+                    if (lineCount < 100000) {
+                        fprintf(file, "Master detecting Process P%i RELEASING resources at clock time %li:%09li\n", p, (long)*sharedSecs, (long)*sharedNS);
+                        ++lineCount;
+                    }
+
+                    //Decrease value in allocation matrix and vector
+                    alloMtx[p][r] -= 1;
+                    alloVec[r] -= 1;
+
+                    //Log to file
+                    if (lineCount < 100000) {
+                        fprintf(file, "\tResources released: R%i:1\n", r);
+                        ++lineCount;
+                    }
+
+                    resourceTbl->reqMtx[p][r] = 0;
+                }
+            }
+        }
+
+        /********************************************************************************************************************
+        If the clock has hit the random time, make a new process
+        *********************************************************************************************************************/
+        if (((*sharedSecs * BILLION) + *sharedNS) > ((initialTimeSecs * BILLION) + initialTimeNS + randomTimeNS)) {
+            //Add time to the clock
+            *sharedNS += 500000; //0.5 milliseconds
+            if (*sharedNS >= BILLION) {
+                *sharedSecs += 1;
+                *sharedNS -= BILLION;
             }
 
-            //Allocate block and execute process
-            if (childPid == 0) {
-                sprintf(iNum, "%i", iInc);
-                execl("./user_proc", iNum, NULL);
-            } else {
-                //Store childPid
-                resourceTbl->pidArray[iInc] = childPid;
+            //Before creating child, reset iInc value to the first available empty slot in table
+            for (int j = 0; j < 18; j++) {
+                if (resourceTbl->pidArray[j] == 0) {
+                    iInc = j;
+                    maxProcsHit = 0;
+                    break;
+                }
+                maxProcsHit = 1;
+            }
 
-                sleep(1);
+            // printf("Checking value of alloVec: ");
+            // for (int i = 0; i < 10; i++) {
+            //     printf("%i ", alloVec[i]);
+            // }
+            // printf("\n");
+
+            //Create a user process
+            if (maxProcsHit == 0) {
+                childPid = fork();
+                if (childPid == -1) {
+                    strcpy(report, ": childPid");
+                    message = strcat(title, report);
+                    perror(message);
+                    return 1;
+                }
+
+                //Allocate and execute
+                if (childPid == 0) {
+                    sprintf(iNum, "%i", iInc);
+                    execl("./user_proc", iNum, NULL);
+                } else {
+                    //Store childPid
+                    resourceTbl->pidArray[iInc] = childPid;
+
+                    //Log to file
+                    if (lineCount < 100000) {
+                        fprintf(file, "Master creating new Process P%i at clock time %li:%09li\n", iInc, (long)*sharedSecs, (long)*sharedNS);
+                        ++lineCount;
+                    }
+                }
+            }
+
+            //Reset switch
+            initSwitch = 1;
+        }
+
+        /********************************************************************************************************************
+        Print table every 20 granted requests
+        *********************************************************************************************************************/
+        if (lineCount < 100000) {
+            if (requestCount > 20) {
+                fprintf(file, "\tR0\tR1\tR2\tR3\tR4\tR5\tR6\tR7\tR8\tR9\n");
+                ++lineCount;
+                for (int t = 0; t < 18; t++) {
+                    fprintf(file, "P%i", t);
+                    for (int u = 0; u < 10; u++) {
+                        fprintf(file, "\t %i", alloMtx[t][u]);
+                    }
+                    fprintf(file, "\n");
+                    ++lineCount;
+                }
+
+                requestCount = 0;
             }
         }
     }
