@@ -39,11 +39,11 @@ void endProcess() {
 int main(int argc, char *argv[])
 {
     int shmid_NS, shmid_Secs, shmid_Rsrc;
-    unsigned int initialSharedSecs, initialSharedNS, newTimeNS;
-    int initSwitch = 1, ownedSwitch = 0;
+    unsigned int creationTimeSecs, creationTimeNS, initialSharedSecs, initialSharedNS, initialTermSecs, initialTermNS, newTimeNS, termTimeNS;
+    int initSwitch = 1, ownedSwitch = 0, termSwitch = 1;
     int randomRsrcPos;
     int resourcesObtained[10] = {0};
-    int requestChance = 60, luckyRelease = 30;
+    int requestChance = 50, luckyRelease = 30, terminationChance = 10;
 
     int msqid;
     int i = atoi(argv[0]);
@@ -115,12 +115,17 @@ int main(int argc, char *argv[])
     //Initialize RNG
     srand(getpid() * time(NULL));
 
-    //Set bound B
-    int B = 25000000; //25 milliseconds
+    //Set time interval bounds
+    int B = 15000000; //15 milliseconds
+    int D = 250000000; //250 milliseconds
+
+    //Set creation time, so process stays alive for at least 1 second
+    creationTimeSecs = *sharedSecs;
+    creationTimeNS = *sharedSecs;
 
     for (;;) {
         //If a resource was requested, spin until it's given
-        for (int s = 0; s < 18; s++) {
+        for (int s = 0; s < 10; s++) {
             if (resourceTbl->reqMtx[i][s] > 0) {
                 while (resourceTbl->reqMtx[i][s] > 0) {}
             }
@@ -131,8 +136,17 @@ int main(int argc, char *argv[])
             initialSharedSecs = *sharedSecs;
             initialSharedNS = *sharedNS;
 
-            newTimeNS = rand() % B;
+            newTimeNS = rand() % (B + 1);
             initSwitch = 0;
+        }
+
+        //Get separate time interval for self-termination
+        if (termSwitch == 1) {
+            initialTermSecs = *sharedSecs;
+            initialTermNS = *sharedNS;
+
+            termTimeNS = rand() % (D + 1);
+            termSwitch = 0;
         }
 
         /********************************************************************************************************************
@@ -151,6 +165,13 @@ int main(int argc, char *argv[])
                 resourcesObtained[randomRsrcPos] += 1;
                 ownedSwitch = 1;
             } else if (ownedSwitch == 1) {
+                // if (i == 2) {
+                //     printf("Process 2, ResourcesObtained says: ");
+                //     for (int r = 0; r < 10; r++) {
+                //         printf("%i ", resourcesObtained[r]);
+                //     }
+                //     printf(" at time %li:%09li\n", (long)*sharedSecs, (long)*sharedNS);
+                // }
                 //Release 1 of a random resource you control (keep running a dice roll on each possible value until one releases)
                 for (int l = 0;;l++) {
                     if (resourcesObtained[l] != 0) {
@@ -161,7 +182,7 @@ int main(int argc, char *argv[])
                         }
                     }
                     
-                    if (l >= 17) {
+                    if (l >= 9) {
                         l = 0;
                     }
                 }
@@ -179,6 +200,20 @@ int main(int argc, char *argv[])
 
             //Reset timer switch
             initSwitch = 1;
+        }
+
+        /********************************************************************************************************************
+        If the clock has hit the other random time, decide whether to DIE DRAMATICALLY
+        *********************************************************************************************************************/
+        if ((((*sharedSecs * BILLION) + *sharedNS) > ((creationTimeSecs * BILLION) + creationTimeNS + BILLION)) &&
+           (((*sharedSecs * BILLION) + *sharedNS) > ((initialTermSecs * BILLION) + initialTermNS + termTimeNS))) {
+            //Do a russian roulette dice roll
+            if ((rand() % 100) < terminationChance) {
+                resourceTbl->reqMtx[i][0] = -30;
+                endProcess();
+            }
+
+            termSwitch = 1;
         }
     }
 
