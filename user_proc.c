@@ -11,7 +11,13 @@
 
 unsigned int *sharedNS;
 unsigned int *sharedSecs;
+struct Stats *statistics = {0};
 struct RT *resourceTbl = {0};
+
+struct Stats {
+    int immediateRequests, delayedRequests, deadlockTerminations, naturalTerminations, deadlockRuns;
+    float deadlockConsiderations, deadlockTerminationAverage;
+};
 
 struct RT {
     pid_t pidArray[18];
@@ -33,24 +39,29 @@ void endProcess() {
         perror("./user_proc: endShmdtRsrc");
     }
 
+    if (shmdt(statistics) == -1) {
+        perror("./user_proc: endShmdtStat");
+    }
+
     exit(0);
 }
 
 int main(int argc, char *argv[])
 {
-    int shmid_NS, shmid_Secs, shmid_Rsrc;
+    int shmid_NS, shmid_Secs, shmid_Rsrc, shmid_Stat;
     unsigned int creationTimeSecs, creationTimeNS, initialSharedSecs, initialSharedNS, initialTermSecs, initialTermNS, newTimeNS, termTimeNS;
     int initSwitch = 1, ownedSwitch = 0, termSwitch = 1;
     int randomRsrcPos, randomRsrcStorage;
     int resourcesObtained[10] = {0};
-    int requestChance = 50, luckyRelease = 30, terminationChance = 10;
+    int requestChance = 40, luckyRelease = 40, terminationChance = 10;
 
     int msqid;
     int i = atoi(argv[0]);
 
     key_t keyNS = ftok("./README.txt", 'Q');
     key_t keySecs = ftok("./README.txt", 'b');
-    key_t keyRsrc = ftok(".user_proc.c", 't');
+    key_t keyRsrc = ftok("./user_proc.c", 'r');
+    key_t keyStat = ftok("./user_proc.c", 't');
 
     //Format "perror"
     char* title = argv[0];
@@ -82,6 +93,14 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    shmid_Stat = shmget(keyStat, sizeof(statistics), IPC_CREAT | 0666);
+    if (shmid_Stat == -1) {
+        strcpy(report, ": shmgetStat");
+        message = strcat(title, report);
+        perror(message);
+        return 1;
+    }
+
     //Attach shared memory
     sharedNS = (unsigned int*)shmat(shmid_NS, NULL, 0);
     if (sharedNS == (void *) -1) {
@@ -102,6 +121,14 @@ int main(int argc, char *argv[])
     resourceTbl = shmat(shmid_Rsrc, NULL, 0);
     if (resourceTbl == (void *) -1) {
         strcpy(report, ": shmatRsrc");
+        message = strcat(title, report);
+        perror(message);
+        return 1;
+    }
+
+    statistics = shmat(shmid_Stat, NULL, 0);
+    if (statistics == (void *) -1) {
+        strcpy(report, ": shmatStat");
         message = strcat(title, report);
         perror(message);
         return 1;
@@ -206,6 +233,7 @@ int main(int argc, char *argv[])
             //Do a russian roulette dice roll
             if ((rand() % 100) < terminationChance) {
                 resourceTbl->reqMtx[i][0] = -30;
+                statistics->naturalTerminations += 1;
                 endProcess();
             }
 

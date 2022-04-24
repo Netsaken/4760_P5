@@ -12,15 +12,21 @@
 #include <unistd.h>
 
 #define BILLION 1000000000UL //1 second in nanoseconds
-#define VERBOSE 1; //1 is on, 0 is off
+#define VERBOSE 1 //1 is on, 0 is off
 
 pid_t childPid;
 FILE *file;
 
 unsigned int *sharedNS = 0;
 unsigned int *sharedSecs = 0;
+struct Stats *statistics = {0};
 struct RT *resourceTbl = {0};
-int shmid_NS, shmid_Secs, shmid_Rsrc;
+int shmid_NS, shmid_Secs, shmid_Rsrc, shmid_Stat;
+
+struct Stats {
+    int immediateRequests, delayedRequests, deadlockTerminations, naturalTerminations, deadlockRuns;
+    float deadlockConsiderations, deadlockTerminationAverage;
+};
 
 struct RT {
     pid_t pidArray[18];
@@ -36,17 +42,29 @@ static void handle_sig(int sig) {
     //Print notification
     printf("Program finished or interrupted. Cleaning up...\n");
 
+    //Output statistics
+    statistics->deadlockTerminationAverage = (float) statistics->deadlockTerminations / statistics->deadlockConsiderations;
+    fprintf(file, "\n# of Requests granted immediately: %i\n", statistics->immediateRequests);
+    fprintf(file, "# of Requests granted after waiting: %i\n", statistics->delayedRequests);
+    fprintf(file, "# of Processes Terminated by Deadlock Detection: %i\n", statistics->deadlockTerminations);
+    fprintf(file, "# of Processes Successfully Terminated On Their Own: %i\n", statistics->naturalTerminations);
+    fprintf(file, "Deadlock Detection ran %i times, terminating %i processes.\n", statistics->deadlockRuns, statistics->deadlockTerminations);
+    fprintf(file, "Deadlock Detection eliminated %f%% of processes on average, out of %i processes considered.", statistics->deadlockTerminationAverage * 100, (int) statistics->deadlockConsiderations);
+    fseek(file, 0, SEEK_CUR);
+    fflush(file);
+    fseek(file, 0, SEEK_CUR);
+
     //Close file
     fclose(file);
 
     //End children
-    sleep(1);
     for (int k = 0; k < 18; k++) {
         if (resourceTbl->pidArray[k] != 0) {
             kill(resourceTbl->pidArray[k], SIGTERM);
             waitpid(resourceTbl->pidArray[k], &status, 0);
         }
     }
+    sleep(1);
 
     //Detach shared memory
     if (shmdt(sharedNS) == -1) {
@@ -61,6 +79,10 @@ static void handle_sig(int sig) {
         perror("./oss: sigShmdtRsrc");
     }
 
+    if (shmdt(statistics) == -1) {
+        perror("./oss: sigShmdtStat");
+    }
+
     //Remove shared memory
     if (shmctl(shmid_NS, IPC_RMID, 0) == -1) {
         perror("./oss: sigShmctlNS");
@@ -72,6 +94,10 @@ static void handle_sig(int sig) {
 
     if (shmctl(shmid_Rsrc, IPC_RMID, 0) == -1) {
         perror("./oss: sigShmctlRsrc");
+    }
+
+    if (shmctl(shmid_Stat, IPC_RMID, 0) == -1) {
+        perror("./oss: sigShmctlStat");
     }
 
     printf("Cleanup complete!\n");
@@ -107,10 +133,6 @@ bool deadlock(const int m, const int n, const int allocated[18][10], const int a
     for (int i = 0; i < m; i++) {
         work[i] = alloVec[i]; //Available resources
     }
-    // for (int x = 0; x < 10; x++) {
-    //     printf("%i ", work[x]);
-    // }
-    // puts("");
     for (int i = 0; i < n; finish[i++] = false);
     
     int p = 0;
@@ -133,24 +155,6 @@ bool deadlock(const int m, const int n, const int allocated[18][10], const int a
         }
     }
 
-    // for (int x = 0; x < 10; x++) {
-    //     printf("%i ", work[x]);
-    // }
-    // puts("");
-    // bool check = false;
-    // for (int x = 0; x < 18; x++) {
-    //     if (finish[x] != true) {
-    //         check = true;
-    //         break;
-    //     }    
-    // }
-    // if (check == true) {
-    //     for (int x = 0; x < 18; x++) {
-    //         printf("%s ", finish[x] ? "true" : "false");
-    //     }
-    //     puts("");
-    // }
-
     return (p != n);
 }
 
@@ -161,14 +165,18 @@ int main(int argc, char *argv[])
 
     key_t keyNS = ftok("./README.txt", 'Q');
     key_t keySecs = ftok("./README.txt", 'b');
-    key_t keyRsrc = ftok(".user_proc.c", 't');
+    key_t keyRsrc = ftok("./user_proc.c", 'r');
+    key_t keyStat = ftok("./user_proc.c", 't');
     char iNum[3];
     int iInc = 0;
     int maxProcsHit = 0, fortyProcs = 0, requestCount = 0, lineCount = 0;
 
     unsigned long initialTimeNS, initialTimeSecs, deadlockInitSecs, deadlockInitNS;
     unsigned int randomTimeNS = 0;
-    int initSwitch = 1, endCheck = 0, deadlockSwitch = 1, deadlockEscape = 0;
+    int initSwitch = 1, endCheck = 0, deadlockSwitch = 1, deadlockEscape = 0, deadlockClear = 0, collectCheck = 0;
+
+    bool immediateResponse[18] = {0};
+    bool dumpCheck;
 
     //Format "perror"
     char* title = argv[0];
@@ -208,6 +216,14 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    shmid_Stat = shmget(keyStat, sizeof(statistics), IPC_CREAT | 0666);
+    if (shmid_Stat == -1) {
+        strcpy(report, ": shmgetStat");
+        message = strcat(title, report);
+        perror(message);
+        return 1;
+    }
+    
     //Attach shared memory
     sharedNS = shmat(shmid_NS, NULL, 0);
     if (sharedNS == (void *) -1) {
@@ -228,6 +244,14 @@ int main(int argc, char *argv[])
     resourceTbl = shmat(shmid_Rsrc, NULL, 0);
     if (resourceTbl == (void *) -1) {
         strcpy(report, ": shmatRsrc");
+        message = strcat(title, report);
+        perror(message);
+        return 1;
+    }
+
+    statistics = shmat(shmid_Stat, NULL, 0);
+    if (statistics == (void *) -1) {
+        strcpy(report, ": shmatStat");
         message = strcat(title, report);
         perror(message);
         return 1;
@@ -325,8 +349,15 @@ int main(int argc, char *argv[])
                         }
 
                         //Reset value in request matrix
-                        //printf("\tThe DECREASE value at [%i][%i] was %i at clock time %li:%09li\n", p, r, resourceTbl->reqMtx[p][r], (long)*sharedSecs, (long)*sharedNS);
                         resourceTbl->reqMtx[p][r] = 0;
+
+                        //Record whether resource was granted immediately or not
+                        if (immediateResponse[p] == true) {
+                            statistics->immediateRequests += 1;
+                        } else {
+                            statistics->delayedRequests += 1;
+                            immediateResponse[p] = true;
+                        }
                     } else {
                         //Log to file
                         if (lineCount < 100000) {
@@ -336,6 +367,9 @@ int main(int argc, char *argv[])
 
                         //If resource is unavailable, put process in Blocked queue and stop checking for them until resources free up
                         blockedQueue[p] = -1;
+
+                        //Set flag that resource was delayed
+                        immediateResponse[p] = false;
                     }
                 //If the number is -30, that process has terminated on its own
                 } else if (resourceTbl->reqMtx[p][r] == -30) {
@@ -413,7 +447,7 @@ int main(int argc, char *argv[])
 
         //If all processes have been terminated and new processes cannot be created, end program
         for (int e = 0; e < 18; e++) {
-            if (resourceTbl->pidArray[e] != 0) {
+            if (resourceTbl->pidArray[e] > 0) {
                 endCheck = 0;
                 break;
             } else {
@@ -421,7 +455,7 @@ int main(int argc, char *argv[])
             }
         }
 
-        if (fortyProcs >= 40 && endCheck == 1) {
+        if (fortyProcs == 40 && endCheck == 1) {
             handle_sig(2);
         }
 
@@ -484,6 +518,9 @@ int main(int argc, char *argv[])
 
             //Detect deadlocks
             for (;;) {
+                //Record run
+                statistics->deadlockRuns += 1;
+
                 if (deadlock(10, 18, alloMtx, alloVec) == true) {
                     //If there are no processes in Blocked queue, escape
                     for (int b = 0; b < 18; b++) {
@@ -504,8 +541,14 @@ int main(int argc, char *argv[])
                         for (int i = 0; i < 18; i++) {
                             if (blockedQueue[i] < 0) {
                                 fprintf(file, "P%i ", i);
+
+                                //Add each detection to stats, one time
+                                if (collectCheck == 0) {
+                                    statistics->deadlockConsiderations += 1;
+                                }
                             }
                         }
+                        collectCheck = 1;
                         fprintf(file, "deadlocked\n");
                         ++lineCount;
                     }
@@ -518,14 +561,6 @@ int main(int argc, char *argv[])
                                 fprintf(file, "\tMaster terminating Process P%i\n", t);
                                 ++lineCount;
                             }
-
-                            // printf("PIDs: \tBlocked:\n");
-                            // for (int i = 0; i < 18; i++) {
-                            //     printf("%i \t", resourceTbl->pidArray[i]);
-                            //     printf("%i\n", blockedQueue[i]);
-                            // }
-                            // puts("");
-                            // printf("Value to be killed: %i\n", resourceTbl->pidArray[t]);
 
                             //Kill process and clear PID
                             kill(resourceTbl->pidArray[t], SIGTERM);
@@ -551,10 +586,12 @@ int main(int argc, char *argv[])
                                 resourceTbl->reqMtx[t][v] = 0;
                             }
 
-                            //Reset Blocked queue to check if their resources can be granted
-                            for (int b = 0; b < 18; b++) {
-                                blockedQueue[b] = 0;
-                            }
+                            //Remove from blocked queue
+                            blockedQueue[t] = 0;
+                            deadlockClear = 1;
+
+                            //Record termination
+                            statistics->deadlockTerminations += 1;
 
                             break;
                         }
@@ -569,43 +606,77 @@ int main(int argc, char *argv[])
                 }
             }
 
+            collectCheck = 0;
+
+            //If deadlocks were detected, Reset Blocked queue
+            if (deadlockClear == 1) {
+                for (int b = 0; b < 18; b++) {
+                    blockedQueue[b] = 0;
+                }
+
+                deadlockClear = 0;
+            }
+            
             //Reset switch
             deadlockSwitch = 1;
         }
 
         /********************************************************************************************************************
+        Empty the Blocked queue if all processes are in it
+        *********************************************************************************************************************/
+        dumpCheck = true;
+        for (int z = 0; z < 18; z++) {
+            if (resourceTbl->pidArray[z] > 0) {
+                if (blockedQueue[z] < 0) {
+                    continue;
+                } else {
+                    dumpCheck = false;
+                    break;
+                }
+            }
+        }
+
+        if (dumpCheck == true) {
+            for (int b = 0; b < 18; b++) {
+                blockedQueue[b] = 0;
+            }
+        }
+
+        /********************************************************************************************************************
         Print table every 20 granted requests
         *********************************************************************************************************************/
-        if (lineCount < 100000 && requestCount >= 20) {
-            fprintf(file, "RESOURCE VECTOR: ");
-            for (int a = 0; a < 10; a++) {
-                fprintf(file, "\t%i ", resourceTbl->rsrcVec[a]);
-            }
-            fprintf(file, "\n");
-        }
-
-        if (lineCount < 100000 && requestCount >= 20) {
-            fprintf(file, "ALLOCATION VECTOR: ");
-            for (int a = 0; a < 10; a++) {
-                fprintf(file, "\t%i ", alloVec[a]);
-            }
-            fprintf(file, "\n");
-        }
-
-        if (lineCount < 100000) {
-            if (requestCount >= 20) {
-                fprintf(file, "\tR0\tR1\tR2\tR3\tR4\tR5\tR6\tR7\tR8\tR9\n");
-                ++lineCount;
-                for (int t = 0; t < 18; t++) {
-                    fprintf(file, "P%i", t);
-                    for (int u = 0; u < 10; u++) {
-                        fprintf(file, "\t %i", alloMtx[t][u]);
-                    }
-                    fprintf(file, "\n");
-                    ++lineCount;
+        if (VERBOSE == 1) {
+            if (lineCount < 100000 && requestCount >= 20) {
+                fprintf(file, "RESOURCE VECTOR: ");
+                for (int a = 0; a < 10; a++) {
+                    fprintf(file, "\t%i ", resourceTbl->rsrcVec[a]);
                 }
+                fprintf(file, "\n");
+            }
 
-                requestCount = 0;
+            if (lineCount < 100000 && requestCount >= 20) {
+                fprintf(file, "ALLOCATION VECTOR: ");
+                for (int a = 0; a < 10; a++) {
+                    fprintf(file, "\t%i ", alloVec[a]);
+                }
+                fprintf(file, "\n");
+            }
+
+            if (lineCount < 100000) {
+                if (requestCount >= 20) {
+                    fprintf(file, "\tR0\tR1\tR2\tR3\tR4\tR5\tR6\tR7\tR8\tR9\n");
+                    ++lineCount;
+                    for (int t = 0; t < 18; t++) {
+                        fprintf(file, "P%i", t);
+                        for (int u = 0; u < 10; u++) {
+                            fprintf(file, "\t %i", alloMtx[t][u]);
+                        }
+                        fprintf(file, "\n");
+                        ++lineCount;
+                    }
+
+                    requestCount = 0;
+                }
             }
         }
     }
