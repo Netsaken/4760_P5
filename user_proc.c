@@ -41,7 +41,7 @@ int main(int argc, char *argv[])
     int shmid_NS, shmid_Secs, shmid_Rsrc;
     unsigned int creationTimeSecs, creationTimeNS, initialSharedSecs, initialSharedNS, initialTermSecs, initialTermNS, newTimeNS, termTimeNS;
     int initSwitch = 1, ownedSwitch = 0, termSwitch = 1;
-    int randomRsrcPos;
+    int randomRsrcPos, randomRsrcStorage;
     int resourcesObtained[10] = {0};
     int requestChance = 50, luckyRelease = 30, terminationChance = 10;
 
@@ -158,26 +158,22 @@ int main(int argc, char *argv[])
 
             //Do a dice roll on whether to request or release a resource
             if ((rand() % 100) < requestChance) {
-                //Request 1 of a random resource
-                resourceTbl->reqMtx[i][randomRsrcPos] += 1;
+                //Request a random amount of a random resource
+                randomRsrcStorage = (rand() % resourceTbl->rsrcVec[randomRsrcPos]) + 1;
+                resourceTbl->reqMtx[i][randomRsrcPos] += randomRsrcStorage;
                 
                 //Can't continue until resource is granted, so assume it's being granted
-                resourcesObtained[randomRsrcPos] += 1;
+                resourcesObtained[randomRsrcPos] += randomRsrcStorage;
                 ownedSwitch = 1;
             } else if (ownedSwitch == 1) {
-                // if (i == 2) {
-                //     printf("Process 2, ResourcesObtained says: ");
-                //     for (int r = 0; r < 10; r++) {
-                //         printf("%i ", resourcesObtained[r]);
-                //     }
-                //     printf(" at time %li:%09li\n", (long)*sharedSecs, (long)*sharedNS);
-                // }
-                //Release 1 of a random resource you control (keep running a dice roll on each possible value until one releases)
+                //Release a random amount of a random resource you control (keep running a dice roll on each possible value until one releases)
                 for (int l = 0;;l++) {
                     if (resourcesObtained[l] != 0) {
                         if ((rand() % 100) < luckyRelease) {
-                            resourceTbl->reqMtx[i][l] -= 1;
-                            resourcesObtained[l] -= 1;
+                            randomRsrcStorage = (rand() % resourcesObtained[l]) + 1;
+
+                            resourceTbl->reqMtx[i][l] -= randomRsrcStorage;
+                            resourcesObtained[l] -= randomRsrcStorage;
                             break;
                         }
                     }
@@ -216,19 +212,6 @@ int main(int argc, char *argv[])
             termSwitch = 1;
         }
     }
-
-
-    //printf("Hi there! o/ My name is Proccy %i! :B\n", i);
-    // printf("Here the array:\n");
-    // for (int j = 0; j < 10; j++) {
-    //     printf("%i ", resourceTbl->rsrcVec[j]);
-    // }
-    // printf("\n");
-
-    // while(1) {
-    //     printf("Testing Sigterm... this should stop... %i\n", i);
-    //     sleep(1);
-    // }
 
     endProcess();
 

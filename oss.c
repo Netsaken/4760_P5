@@ -32,15 +32,7 @@ struct RT {
 static void handle_sig(int sig) {
     int errsave, status;
     errsave = errno;
-    // printf("REQUEST MATRIX:\n");
-    // printf("\tR0\tR1\tR2\tR3\tR4\tR5\tR6\tR7\tR8\tR9\n");
-    //             for (int t = 0; t < 18; t++) {
-    //                 printf("P%i", t);
-    //                 for (int u = 0; u < 10; u++) {
-    //                     printf("\t %i", resourceTbl->reqMtx[t][u]);
-    //                 }
-    //                 printf("\n");
-    //             }
+
     //Print notification
     printf("Program finished or interrupted. Cleaning up...\n");
 
@@ -55,8 +47,6 @@ static void handle_sig(int sig) {
             waitpid(resourceTbl->pidArray[k], &status, 0);
         }
     }
-    // kill(0, SIGTERM);
-    // waitpid(childPid, &status, 0);
 
     //Detach shared memory
     if (shmdt(sharedNS) == -1) {
@@ -107,10 +97,6 @@ bool req_lt_avail(const int *avail, const int pnum, const int num_res)
         }
     }
 
-    // if (i != num_res) {
-    //     printf("On return, i is %i, num_res is %i\n", i, num_res);
-    //     printf("\tand the value is %s\n", (i == num_res) ? "true" : "false");
-    // }
     return (i == num_res);
 }
 
@@ -121,6 +107,10 @@ bool deadlock(const int m, const int n, const int allocated[18][10], const int a
     for (int i = 0; i < m; i++) {
         work[i] = alloVec[i]; //Available resources
     }
+    // for (int x = 0; x < 10; x++) {
+    //     printf("%i ", work[x]);
+    // }
+    // puts("");
     for (int i = 0; i < n; finish[i++] = false);
     
     int p = 0;
@@ -174,11 +164,11 @@ int main(int argc, char *argv[])
     key_t keyRsrc = ftok(".user_proc.c", 't');
     char iNum[3];
     int iInc = 0;
-    int maxProcsHit = 0, requestCount = 0, lineCount = 0;
+    int maxProcsHit = 0, fortyProcs = 0, requestCount = 0, lineCount = 0;
 
     unsigned long initialTimeNS, initialTimeSecs, deadlockInitSecs, deadlockInitNS;
     unsigned int randomTimeNS = 0;
-    int initSwitch = 1, deadlockSwitch = 1;
+    int initSwitch = 1, endCheck = 0, deadlockSwitch = 1, deadlockEscape = 0;
 
     //Format "perror"
     char* title = argv[0];
@@ -248,15 +238,16 @@ int main(int argc, char *argv[])
     Start doing things here
 
     *********************************************************************************/
-    //End program after 2 seconds
-    alarm(2);
+    //End program after 5 seconds
+    alarm(5);
 
     //Add processes to blocked queue when they're stuck waiting
     int blockedQueue[18] = {0};
     
     //Randomize values for shared resource vector (total resources)
     srand(time(NULL));
-    for (int i = 0; i < 10; i++) { 
+    
+    for (int i = 0; i < 10; i++) {
         resourceTbl->rsrcVec[i] = (rand() % 20) + 1; //Between 1 and 20, inclusive
     }
 
@@ -320,26 +311,26 @@ int main(int argc, char *argv[])
                     }
 
                     //If resource is available, grant it
-                    if (alloVec[r] > 0) {
+                    if (alloVec[r] >= resourceTbl->reqMtx[p][r]) {
                         ++requestCount;
 
                         //Increase value in allocation matrix and decrease vector
-                        alloMtx[p][r] += 1;
-                        alloVec[r] -= 1;
+                        alloMtx[p][r] += resourceTbl->reqMtx[p][r];
+                        alloVec[r] -= resourceTbl->reqMtx[p][r];
 
                         //Log to file
                         if (lineCount < 100000) {
-                            fprintf(file, "\tMaster granting Resource R%i to Process P%i at clock time %li:%09li\n", r, p, (long)*sharedSecs, (long)*sharedNS);
+                            fprintf(file, "\tMaster granting Resources R%i:%i to Process P%i at clock time %li:%09li\n", r, resourceTbl->reqMtx[p][r], p, (long)*sharedSecs, (long)*sharedNS);
                             ++lineCount;
                         }
 
-                        //Decrease value in request matrix
-                        //printf("\tThe value at [%i][%i] was %i at clock time %li:%09li\n", p, r, resourceTbl->reqMtx[p][r], (long)*sharedSecs, (long)*sharedNS);
+                        //Reset value in request matrix
+                        //printf("\tThe DECREASE value at [%i][%i] was %i at clock time %li:%09li\n", p, r, resourceTbl->reqMtx[p][r], (long)*sharedSecs, (long)*sharedNS);
                         resourceTbl->reqMtx[p][r] = 0;
                     } else {
                         //Log to file
                         if (lineCount < 100000) {
-                            fprintf(file, "\tResource R%i is unavailable, Process P%i is Blocked at clock time %li:%09li\n", r, p, (long)*sharedSecs, (long)*sharedNS);
+                            fprintf(file, "\tResource R%i:%i is unavailable, Process P%i is Blocked at clock time %li:%09li\n", r, resourceTbl->reqMtx[p][r], p, (long)*sharedSecs, (long)*sharedNS);
                             ++lineCount;
                         }
 
@@ -385,13 +376,13 @@ int main(int argc, char *argv[])
                         ++lineCount;
                     }
 
-                    //Decrease value in allocation matrix and increase vector
-                    alloMtx[p][r] -= 1;
-                    alloVec[r] += 1;
+                    //Increase value in allocation matrix and decrease vector (because the values in the request matrix here are negative)
+                    alloMtx[p][r] += resourceTbl->reqMtx[p][r];
+                    alloVec[r] -= resourceTbl->reqMtx[p][r];
 
                     //Log to file
                     if (lineCount < 100000) {
-                        fprintf(file, "\tResources released: R%i:1\n", r);
+                        fprintf(file, "\tResources released: R%i:%i\n", r, abs(resourceTbl->reqMtx[p][r]));
                         ++lineCount;
                     }
 
@@ -400,8 +391,9 @@ int main(int argc, char *argv[])
                         blockedQueue[b] = 0;
                     }
 
-                    //Increase value in request matrix
-                    resourceTbl->reqMtx[p][r] += 1;
+                    //Reset value in request matrix
+                    //printf("\tThe INCREASE value at [%i][%i] was %i at clock time %li:%09li\n", p, r, resourceTbl->reqMtx[p][r], (long)*sharedSecs, (long)*sharedNS);
+                    resourceTbl->reqMtx[p][r] = 0;
                 }
             }
         }
@@ -419,30 +411,29 @@ int main(int argc, char *argv[])
             maxProcsHit = 1;
         }
 
-        if (maxProcsHit == 0 && (((*sharedSecs * BILLION) + *sharedNS) > ((initialTimeSecs * BILLION) + initialTimeNS + randomTimeNS))) {
+        //If all processes have been terminated and new processes cannot be created, end program
+        for (int e = 0; e < 18; e++) {
+            if (resourceTbl->pidArray[e] != 0) {
+                endCheck = 0;
+                break;
+            } else {
+                endCheck = 1;
+            }
+        }
+
+        if (fortyProcs >= 40 && endCheck == 1) {
+            handle_sig(2);
+        }
+
+        //Create child if able
+        if (fortyProcs < 40 && maxProcsHit == 0 && (((*sharedSecs * BILLION) + *sharedNS) > ((initialTimeSecs * BILLION) + initialTimeNS + randomTimeNS))) {
             //Add time to the clock
             *sharedNS += 500000; //0.5 milliseconds
             if (*sharedNS >= BILLION) {
                 *sharedSecs += 1;
                 *sharedNS -= BILLION;
             }
-
-            //Before creating child, reset iInc value to the first available empty slot in table
-            for (int j = 0; j < 18; j++) {
-                if (resourceTbl->pidArray[j] == 0) {
-                    iInc = j;
-                    maxProcsHit = 0;
-                    break;
-                }
-                maxProcsHit = 1;
-            }
-
-            // printf("Checking value of alloVec: ");
-            // for (int i = 0; i < 10; i++) {
-            //     printf("%i ", alloVec[i]);
-            // }
-            // printf("\n");
-
+            
             //Create a user process
             childPid = fork();
             if (childPid == -1) {
@@ -466,6 +457,9 @@ int main(int argc, char *argv[])
                     ++lineCount;
                 }
             }
+
+            //Add to total process count
+            ++fortyProcs;
 
             //Reset switch
             initSwitch = 1;
@@ -491,6 +485,19 @@ int main(int argc, char *argv[])
             //Detect deadlocks
             for (;;) {
                 if (deadlock(10, 18, alloMtx, alloVec) == true) {
+                    //If there are no processes in Blocked queue, escape
+                    for (int b = 0; b < 18; b++) {
+                        if (blockedQueue[b] < 0) {
+                            deadlockEscape = 0;
+                            break;
+                        } else {
+                            deadlockEscape = 1;
+                        }
+                    }
+                    if (deadlockEscape == 1) {
+                        break;
+                    }
+
                     //Log to file
                     if (lineCount < 100000) {
                         fprintf(file, "DEADLOCK DETECTED: Processes ");
@@ -512,9 +519,19 @@ int main(int argc, char *argv[])
                                 ++lineCount;
                             }
 
+                            // printf("PIDs: \tBlocked:\n");
+                            // for (int i = 0; i < 18; i++) {
+                            //     printf("%i \t", resourceTbl->pidArray[i]);
+                            //     printf("%i\n", blockedQueue[i]);
+                            // }
+                            // puts("");
+                            // printf("Value to be killed: %i\n", resourceTbl->pidArray[t]);
+
+                            //Kill process and clear PID
                             kill(resourceTbl->pidArray[t], SIGTERM);
                             resourceTbl->pidArray[t] = 0;
 
+                            //Log resources
                             if (lineCount < 100000) {
                                 fprintf(file, "Resources released: ");
                                 for (int r = 0; r < 10; r++) {
@@ -529,14 +546,19 @@ int main(int argc, char *argv[])
                                 ++lineCount;
                             }
 
-                            //Remove from Blocked queue
-                            blockedQueue[t] = 0;
+                            //Reset values in request matrix
+                            for (int v = 0; v < 10; v++) {
+                                resourceTbl->reqMtx[t][v] = 0;
+                            }
+
+                            //Reset Blocked queue to check if their resources can be granted
+                            for (int b = 0; b < 18; b++) {
+                                blockedQueue[b] = 0;
+                            }
 
                             break;
                         }
                     }
-
-                    continue;
                 } else {
                     //Log to file
                     if (lineCount < 100000) {
@@ -554,7 +576,7 @@ int main(int argc, char *argv[])
         /********************************************************************************************************************
         Print table every 20 granted requests
         *********************************************************************************************************************/
-        if (lineCount < 100000 && requestCount > 20) {
+        if (lineCount < 100000 && requestCount >= 20) {
             fprintf(file, "RESOURCE VECTOR: ");
             for (int a = 0; a < 10; a++) {
                 fprintf(file, "\t%i ", resourceTbl->rsrcVec[a]);
@@ -562,7 +584,7 @@ int main(int argc, char *argv[])
             fprintf(file, "\n");
         }
 
-        if (lineCount < 100000 && requestCount > 20) {
+        if (lineCount < 100000 && requestCount >= 20) {
             fprintf(file, "ALLOCATION VECTOR: ");
             for (int a = 0; a < 10; a++) {
                 fprintf(file, "\t%i ", alloVec[a]);
@@ -571,7 +593,7 @@ int main(int argc, char *argv[])
         }
 
         if (lineCount < 100000) {
-            if (requestCount > 20) {
+            if (requestCount >= 20) {
                 fprintf(file, "\tR0\tR1\tR2\tR3\tR4\tR5\tR6\tR7\tR8\tR9\n");
                 ++lineCount;
                 for (int t = 0; t < 18; t++) {
