@@ -126,7 +126,7 @@ bool req_lt_avail(const int *avail, const int pnum, const int num_res)
     return (i == num_res);
 }
 
-bool deadlock(const int m, const int n, const int allocated[18][10], const int alloVec[10])
+bool deadlock(const int m, const int n, int allocated[18][10], const int alloVec[10])
 {
     int work[m];    // m resources
     bool finish[n]; // n processes
