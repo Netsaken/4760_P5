@@ -27,3 +27,7 @@ of it. However, the program still frequently gets into a situation where the las
 requesting resources that they already own and for some reason won't release or terminate through RNG.
 - Verbose option not fully implemented. If turned off (by setting the #defined VERBOSE to 0), it will only
 stop the table from printing.
+
+- A separate issue (now fixed), was a "resource temporarily unavailable" error when I ran the program on hoare.
+I figured out that it was because I was missing a waitpid() instruction after my mid-run kill() call. Noting
+this for future reference.
