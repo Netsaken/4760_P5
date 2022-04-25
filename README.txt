@@ -20,10 +20,10 @@ handles its own termination.
 
 Problems:
 - The shared clock is not accessed using a semaphore. Not sure that was required.
-- Program frequently ran into an issue where all processes were stuck in the Blocked queue, but
-deadlock detection didn't read a deadlock. I'm not sure if that's an error in the deadlock detection.
+- Program frequently runs into an issue where all processes are stuck in the Blocked queue, but
+deadlock detection doesn't read a deadlock. I'm not sure if that's an error in the deadlock detection.
 - I tried to fix that by emptying the Blocked queue manually if everything wound up inside
-of it. However, the program still occasionally gets into a situation where the last process(es) alive keep 
-requesting resources that they already own and for some reason won't release or terminate.
+of it. However, the program still frequently gets into a situation where the last process(es) alive keep 
+requesting resources that they already own and for some reason won't release or terminate through RNG.
 - Verbose option not fully implemented. If turned off (by setting the #defined VERBOSE to 0), it will only
 stop the table from printing.
