@@ -162,13 +162,14 @@ int main(int argc, char *argv[])
 {
     signal(SIGINT, handle_sig);
     signal(SIGALRM, handle_sig);
+    signal(SIGABRT, handle_sig);
 
     key_t keyNS = ftok("./README.txt", 'Q');
     key_t keySecs = ftok("./README.txt", 'b');
     key_t keyRsrc = ftok("./user_proc.c", 'r');
     key_t keyStat = ftok("./user_proc.c", 't');
     char iNum[3];
-    int iInc = 0;
+    int iInc = 0, status;
     int maxProcsHit = 0, fortyProcs = 0, requestCount = 0, lineCount = 0;
 
     unsigned long initialTimeNS, initialTimeSecs, deadlockInitSecs, deadlockInitNS;
@@ -188,7 +189,7 @@ int main(int argc, char *argv[])
         strcpy(report, ": setupinterrupt");
         message = strcat(title, report);
         perror(message);
-        return 1;
+        abort();
     }
 
     //Get shared memory
@@ -197,7 +198,7 @@ int main(int argc, char *argv[])
         strcpy(report, ": shmgetNS");
         message = strcat(title, report);
         perror(message);
-        return 1;
+        abort();
     }
 
     shmid_Secs = shmget(keySecs, sizeof(sharedSecs), IPC_CREAT | 0666);
@@ -205,7 +206,7 @@ int main(int argc, char *argv[])
         strcpy(report, ": shmgetSecs");
         message = strcat(title, report);
         perror(message);
-        return 1;
+        abort();
     }
 
     shmid_Rsrc = shmget(keyRsrc, sizeof(resourceTbl), IPC_CREAT | 0666);
@@ -213,7 +214,7 @@ int main(int argc, char *argv[])
         strcpy(report, ": shmgetRsrc");
         message = strcat(title, report);
         perror(message);
-        return 1;
+        abort();
     }
 
     shmid_Stat = shmget(keyStat, sizeof(statistics), IPC_CREAT | 0666);
@@ -221,7 +222,7 @@ int main(int argc, char *argv[])
         strcpy(report, ": shmgetStat");
         message = strcat(title, report);
         perror(message);
-        return 1;
+        abort();
     }
     
     //Attach shared memory
@@ -230,7 +231,7 @@ int main(int argc, char *argv[])
         strcpy(report, ": shmatNS");
         message = strcat(title, report);
         perror(message);
-        return 1;
+        abort();
     }
 
     sharedSecs = shmat(shmid_Secs, NULL, 0);
@@ -238,7 +239,7 @@ int main(int argc, char *argv[])
         strcpy(report, ": shmatSecs");
         message = strcat(title, report);
         perror(message);
-        return 1;
+        abort();
     }
 
     resourceTbl = shmat(shmid_Rsrc, NULL, 0);
@@ -246,7 +247,7 @@ int main(int argc, char *argv[])
         strcpy(report, ": shmatRsrc");
         message = strcat(title, report);
         perror(message);
-        return 1;
+        abort();
     }
 
     statistics = shmat(shmid_Stat, NULL, 0);
@@ -254,7 +255,7 @@ int main(int argc, char *argv[])
         strcpy(report, ": shmatStat");
         message = strcat(title, report);
         perror(message);
-        return 1;
+        abort();
     }
 
     /********************************************************************************
@@ -474,7 +475,7 @@ int main(int argc, char *argv[])
                 strcpy(report, ": childPid");
                 message = strcat(title, report);
                 perror(message);
-                return 1;
+                abort();
             }
 
             // Allocate and execute
@@ -564,6 +565,7 @@ int main(int argc, char *argv[])
 
                             //Kill process and clear PID
                             kill(resourceTbl->pidArray[t], SIGTERM);
+                            waitpid(resourceTbl->pidArray[t], &status, 0);
                             resourceTbl->pidArray[t] = 0;
 
                             //Log resources
